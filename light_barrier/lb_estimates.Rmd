@@ -1,0 +1,615 @@
+---
+title: "lb_estimates"
+output: html_document
+date: "2026-04-01"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE, echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message=FALSE)
+knitr::opts_chunk$set(comment = NA)
+
+library(tidyverse)
+library(scales)
+library(adagio)
+library(lubridate)
+library(fitdistrplus)
+library(reticulate)
+library(knitr)
+library(xtable)
+library(kableExtra)
+library(cowplot)
+library(png)
+library(grid)
+# required scripts
+source("./TimeFrame5.R")
+source("./smallestsubwithsum.R")
+```
+
+```{r functions}
+monthly <- function(x) {
+  x_range <- range(x, na.rm = TRUE)
+  
+  date_range <- c(
+    floor_date(x_range[1], "month"),
+    ceiling_date(x_range[2], "month")
+  )
+  monthly <- seq(date_range[1], date_range[2], by = "1 month")
+  
+  monthly
+}
+
+
+# mean net error set to ±1, SD extrapolated based on regression
+estimate_with_SD_mean1 = function(passes,max,mean_pass,blocked_hours=0){
+    chunk=floor(passes/100)
+    #Regression (ratio of total passes:population size estimate to missed passes)
+    #estimated regression slope = 0.83
+    regression_estimate_SD=0.83
+    missedpasses=0.2*chunk + 1*chunk + chunk*regression_estimate_SD*(passes/max) + blocked_hours*mean_pass
+    missed_chunks=round(missedpasses/100,1)
+    real_chunks=floor(chunk+missed_chunks)
+    #print(paste0("Original chunks: ",chunk),quote = FALSE)
+    #print(paste0("Real chunks: ",real_chunks),quote = FALSE)
+    ratio=round(passes/max,2)
+    #print(paste0("Total passes/population size estimate = ",ratio),quote = FALSE)
+    
+    #Regression (ratio of total passes:population size estimate to SD)
+    #estimated regression slope = 0.22
+    #SD=1 accounts for error based on consecutive LBs in Eldena, Gaussian error prop
+    regression_estimate=0.22
+    SD=round(sqrt((1*1)+(ratio*regression_estimate)*(ratio*regression_estimate)),2) 
+    #print(paste0("SD extrapolated = ",SD),quote = FALSE)
+    se=SD/sqrt(real_chunks)
+    mean_net_error=0
+    #print("Mean net error set to ±1 ",quote = FALSE)
+    lcl = round(((mean_net_error-1) - qt(1 - (0.05 / 2), real_chunks - 1) * se) * real_chunks,0)
+    ucl = round(((mean_net_error+1) + qt(1 - (0.05 / 2), real_chunks - 1) * se) * real_chunks,0)
+    #print(paste0("Population size estimate: ",max," (",max+lcl,"-",max+ucl,")") ,quote = FALSE)
+    return(c(max,max+lcl,max+ucl))
+}
+
+
+# mean net error set to 0, SD extrapolated based on regression
+estimate_with_SD_mean0 = function(passes,max,mean_pass,blocked_hours=0){
+    chunk=floor(passes/100)
+    #Regression (ratio of total passes:population size estimate to missed passes)
+    #estimated regression slope = 0.83
+    regression_estimate_SD=0.83
+    missedpasses=0.2*chunk + 1*chunk + chunk*regression_estimate_SD*(passes/max) + blocked_hours*mean_pass
+    missed_chunks=round(missedpasses/100,1)
+    real_chunks=floor(chunk+missed_chunks)
+    #print(paste0("Original chunks: ",chunk),quote = FALSE)
+    #print(paste0("Real chunks: ",real_chunks),quote = FALSE)
+    ratio=round(passes/max,2)
+    #print(paste0("Total passes/population size estimate = ",ratio),quote = FALSE)
+    
+    #Regression (ratio of total passes:population size estimate to SD)
+    #estimated regression slope = 0.22
+    #SD=1 accounts for error based on consecutive LBs in Eldena, Gaussian error prop
+    regression_estimate=0.22
+    SD=round(sqrt((1*1)+(ratio*regression_estimate)*(ratio*regression_estimate)),2) 
+    #print(paste0("SD extrapolated = ",SD),quote = FALSE)
+    se=SD/sqrt(real_chunks)
+    mean_net_error=0
+    #print("Mean net error set to 0 ",quote = FALSE)
+    lcl = round(((mean_net_error) - qt(1 - (0.05 / 2), real_chunks - 1) * se) * real_chunks,0)
+    ucl = round(((mean_net_error) + qt(1 - (0.05 / 2), real_chunks - 1) * se) * real_chunks,0)
+    #print(paste0("Population size estimate: ",max," (",max+lcl,"-",max+ucl,")") ,quote = FALSE)
+    return(c(max,max+lcl,max+ucl))
+}
+```
+
+```{r settings}
+max_lim=500 #y axis limit for plots
+
+miss=read.csv(paste0("./lb_missing_data.csv"))
+miss$start_date=as.Date(miss$start_date)
+miss$end_date=as.Date(miss$end_date)
+```
+
+```{r activity_plots}
+year_list=c(2019,2023,2024)
+
+for (year in year_list){
+  lb=read.csv(paste0("./lb_data.csv"))
+  
+ 
+    if(year==2019){
+      lb=lb %>% 
+        filter(LS=="A"| LS=="B")
+    }else{
+      lb=lb %>% 
+        filter(LS=="C"| LS=="B")
+    }
+  
+  #daytime filter if lb installed 'at the entrance'
+  lb$Uhrzeit= as.POSIXct(lb$Uhrzeit,format="%H:%M:%S")
+  sunrise=as.POSIXct("09:00:00",format="%H:%M:%S") 
+  sunset=as.POSIXct("15:00:00",format="%H:%M:%S") 
+  
+  lb_f=filter(lb, !(lb$Uhrzeit>sunrise & lb$Uhrzeit<sunset))
+  #filter for current year
+  lb_f=lb %>% 
+    filter(pseudodate>=as.Date(paste0(year,"-07-01")) & pseudodate<=as.Date(paste0(year+1,"-06-30")))
+  
+  #summary per each night
+  sumPdayF= lb_f %>% 
+      group_by(pseudodate) %>% 
+      mutate(total=sum(abs(EventC), na.rm = T),
+            net=sum(EventC, na.rm = T),
+             pos=sum(EventC[EventC==1], na.rm = T),
+             neg=sum(EventC[EventC==-1], na.rm = T)) %>% 
+      distinct(pseudodate, .keep_all = T)
+  
+  #add missing dates
+  sumPdayF=
+    sumPdayF %>%
+    ungroup() %>% 
+    mutate(pseudodate=as.Date(pseudodate)) %>% 
+    complete(pseudodate=seq.Date(as.Date(paste0(year,"-07-01")),as.Date(paste0(year+1,"-06-30")), by="day"),
+             fill = list(total = 0, net = 0, neg=0,pos=0)) 
+
+  sumPdayF$type=sumPdayF$net>0
+  
+  ins=sum(sumPdayF$pos)
+  outs=sum(sumPdayF$neg)
+  total_activity=sum(sumPdayF$total)
+  
+  #missing blocks
+    missing=miss %>% 
+    filter(Year==year | Year==year+1 ) %>% 
+    mutate(start_date=ifelse(as.Date(start_date)<as.Date(paste0(year,"-07-01")),
+                           paste0(year,"-07-01"),
+                           as.character(start_date)),
+           end_date=ifelse(as.Date(end_date)>as.Date(paste0(year+1,"-06-30")),
+                           paste0(year+1,"-06-30"),
+                           as.character(end_date))) 
+    missing$start_date=as.Date(missing$start_date)
+    missing$end_date=as.Date(missing$end_date)
+  
+  #ACTIVITY PLOT
+   sumPdayF %>%
+        dplyr::select(pseudodate,pos,neg) %>%
+        gather("direction","passes",-pseudodate) %>%
+        ggplot(aes(pseudodate,passes))+
+        geom_vline(xintercept = as.Date(paste0(year+1,"-01-01")),
+                 color="grey60",linetype="dashed")+
+        geom_vline(xintercept = as.Date(paste0(year+1,"-02-15")),
+                 color="grey60",linetype="dashed")+
+        geom_col(fill="grey80",col="grey60",linewidth=0.2)+
+        scale_fill_manual(values=c("blue","red"))+
+        geom_col(data=sumPdayF,aes(pseudodate,net,fill=type))+
+        scale_colour_manual(values=c("grey60","grey60"))+
+        scale_y_continuous(breaks=pretty_breaks(n=6))+
+        labs(y="total passes per night (grey)\n  net entry (red), next exit (blue)",x=NULL, title=paste0(year,"/",year+1))+
+        theme_bw()+
+        theme(panel.grid.minor = element_blank(),
+              panel.grid.major = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_line(colour = "black"))+
+        theme(legend.position = "none")+
+        theme(plot.title = element_text(hjust = 0.5))+
+        annotate("rect", xmin = c(missing$start_date), 
+                xmax = c(missing$end_date), 
+                ymin = -Inf, ymax = Inf, alpha = .1, fill = "red")+
+        scale_x_date(date_labels = "%d %b %y",
+                     breaks=monthly, expand=c(0.02,0),
+                     limits=c(as.Date(paste0(year,"-11-01")),
+                              as.Date(paste0(year+1,"-04-30"))))+
+        theme(plot.margin = margin(0.5,0.7,0.2,0.5, "cm"),
+              text = element_text(size = 13))
+      
+    
+   
+     ggsave(paste0("./lb_activity_",year,".png"),width = 25, height = 15, units = "cm")
+    
+   
+    #end of hibernation entry
+      df=
+        sumPdayF %>%
+        dplyr::select(pseudodate,total) %>%
+        filter(pseudodate<as.Date(paste0(year+1,"-03-01")))%>%
+        mutate(day = as.numeric(pseudodate - min(pseudodate)) + 1)
+      
+      
+      # Gaussian function: y = a * exp(-(x - mu)^2 / (2*sigma^2))
+      fit <- nls(
+        total ~ a * exp(-(day - mu)^2 / (2 * sigma^2)),
+        data = df,
+        start = list(a = max(df$total), mu = mean(df$day), sigma = sd(df$day))
+      )
+      summary(fit)
+      
+      df$fit <- predict(fit)
+      
+      threshold <- max(df$total) / 10
+      peak_day <- df$day[which.max(df$total)]
+      
+      end_entry <- df %>%
+        filter(fit < threshold, day > peak_day) %>%
+        first()
+      print(paste("End of hibernation entry:",end_entry$pseudodate))
+      
+      
+      ggplot(df, aes(x = day)) +
+        geom_point(aes(y = total), alpha = 0.6) +
+        geom_line(aes(y = fit), color = "blue", size = 1.2) +
+        theme_minimal()+
+        labs(title=paste0(year,"/",year+1))+
+         geom_vline(xintercept=end_entry$day)+
+         geom_text(
+          data = end_entry,
+          aes(
+            x = day,
+            y = 100,
+            label = format(pseudodate, "%b %d")
+          ),
+          angle = 90,
+          vjust = -0.4,
+          size = 3,
+          color = "blue",
+          inherit.aes = FALSE)
+      
+      #average passes during core hibernation period
+      core_passes_sum=sumPdayF %>% 
+        filter(pseudodate>=as.Date(paste0(year+1,"-01-01"))) %>% 
+        filter(pseudodate<=as.Date(paste0(year+1,"-02-15"))) %>% 
+        summarise(core_avg_net_passes=round(mean(net),0),
+                  core_avg_passes=round(mean(total),0))
+      print(core_passes_sum)
+}
+```
+
+
+```{r loop_years }
+pop_estimates=data.frame(year=0, estimate=0,lcl1=0,ucl1=0, lcl2=0,ucl2=0, ins=0,outs=0, total_passes=0 )
+
+emergence_dates=data.frame(year=0, start=0 , end=0, p5=0 ,p10=0,
+                           p25=0,p50=0,p75=0,p90=0,p95=0 )
+
+emergence_year_list=c(2020,2024,2025)
+for (year in emergence_year_list){
+   
+  
+    if(year==2020){
+       lb=read.csv(paste0("./lb_data.csv"))
+       lb=lb %>% 
+        filter(LS=="A"| LS=="B")
+    }else{
+       lb=read.csv(paste0("./lb_data.csv"))
+       lb=lb %>% 
+        filter(LS=="C"| LS=="B")
+    }
+  
+  #daytime filter if lb installed 'at the entrance'
+  lb$Uhrzeit= as.POSIXct(lb$Uhrzeit,format="%H:%M:%S")
+  sunrise=as.POSIXct("09:00:00",format="%H:%M:%S") 
+  sunset=as.POSIXct("15:00:00",format="%H:%M:%S") 
+  
+  lb_f=filter(lb, !(lb$Uhrzeit>sunrise & lb$Uhrzeit<sunset))
+  
+  #filter for current year
+  lb_f=lb_f %>% 
+    filter(pseudodate>=as.Date(paste0(year,"-01-01")) & pseudodate<=as.Date(paste0(year,"-12-31")))
+  
+  #summary per each night
+  sumPdayF= lb_f %>% 
+      group_by(pseudodate) %>% 
+      mutate(total=sum(abs(EventC), na.rm = T),
+            net=sum(EventC, na.rm = T),
+             pos=sum(EventC[EventC==1], na.rm = T),
+             neg=sum(EventC[EventC==-1], na.rm = T)) %>% 
+      distinct(pseudodate, .keep_all = T)
+  #add missing dates
+  sumPdayF=
+    sumPdayF %>%
+    ungroup() %>% 
+    mutate(pseudodate=as.Date(pseudodate)) %>% 
+    complete(pseudodate=seq.Date(as.Date(paste0(year,"-01-01")),as.Date(paste0(year,"-12-31")), by="day"),
+             fill = list(total = 0, net = 0, neg=0,pos=0)) 
+
+  sumPdayF$type=sumPdayF$net>0
+  
+  #head(sumPdayF)
+  
+#set search window for emergence phase
+    #start is default Jan 1, end is the start of early summer activity swarming (from Python output)
+    may_peak=read.table("./earlysummer_start_days.txt", header=F, sep="\t")
+    colnames(may_peak)=c("year","day")
+    
+    #set start to default Jan 1
+    sumPday=subset(sumPdayF, pseudodate>=as.Date(paste(year,"-01-01", sep=""))) 
+    #set end date based on python output
+    day=may_peak$day[may_peak$year==year]
+    
+    #cut at the start of early summer activity 
+    sumPday_may=sumPday[1:day,]
+    
+    
+    # calculate emergence phase based on max net values (population size estimate)
+    sumPday_may$inv=-sumPday_may$net #method looks for max positive value
+    sumPday_may$inv=ifelse(is.na(sumPday_may$inv),0,sumPday_may$inv)
+    result=maxsub(sumPday_may$inv, inds = T)
+    
+    start=result$inds[1] #index of start date
+    end=result$inds[2] #index of end date
+    netvalue=result$sum #net between start & end date
+    
+    startdate=sumPday_may$pseudodate[start] #start date
+    startdate
+    enddate=sumPday_may$pseudodate[end] #end date
+    enddate
+    netvalue #net between start & end date
+    
+    #subset data for emergence phase
+    Pdates2=split.date(as.character(sumPday$pseudodate), 
+                       format=c("y","m","d"),
+                       sep="-",merge = T)
+    startdateID=split.date(as.character(startdate), 
+                           format=c("y","m","d"),
+                           sep="-",merge = T)
+    enddateID=split.date(as.character(enddate), 
+                         format=c("y","m","d"),
+                         sep="-",merge = T)
+    sumPday2=subset(sumPday, Pdates2>=as.numeric(startdateID) &
+                      Pdates2<=as.numeric(enddateID) )
+    
+    
+    #PERCENTILES
+    sumPday2$net=ifelse(is.na(sumPday2$net),0,sumPday2$net)
+    sumPday2$max_est=netvalue
+    sumPday2$netSum=NA
+    for (i in 1:(nrow(sumPday2))){
+      sumPday2$netSum[i]=sumPday2$max_est[i] + sumPday2$net[i]
+    }
+    
+    for (i in 2:(nrow(sumPday2))){
+      sumPday2$netSum[i]=sumPday2$netSum[i-1] + sumPday2$net[i]
+    }
+    
+    sumPday2$netSum_pct=(sumPday2$netSum*100)/sumPday2$max_est
+    
+    ####
+    upperlimit=95
+    lowerlimit=5
+    
+    sumPday2$incl=ifelse(sumPday2$netSum_pct<upperlimit & sumPday2$netSum_pct>lowerlimit,
+                         1,0)
+    #View(sumPday2)
+    inds=which(sumPday2$incl=="0")
+    if (length(inds)>1) {
+      grp=rep(0,length(inds))
+      len=length(inds)
+      for (i in 1:(len-1)){
+        diff=inds[i+1]-inds[i]
+        if (diff>1){
+          grp[(i+1):len]=grp[(i+1):len]+1
+        }  
+      }
+      
+      if (length(unique(grp))>1) {
+          #start tail
+          f=which(grp==min(grp))  
+          start_tail=inds[which(grp==min(grp))[length(f)]]
+          #end tail
+          end_tail=inds[which(grp==max(grp))[1]]
+          
+          sumPday2$rowID=1:nrow(sumPday2)
+          sumPday2_sub=subset(sumPday2,
+                              sumPday2$rowID>start_tail & sumPday2$rowID<end_tail )
+      } else {
+        start_tail=1
+        end_tail=nrow(sumPday2)
+        sumPday2_sub=sumPday2
+      }
+    } else {
+      start_tail=1
+      end_tail=nrow(sumPday2)
+      sumPday2_sub=sumPday2
+    } 
+    
+    start_date_new=sumPday2$pseudodate[start_tail]
+    end_date_new=sumPday2$pseudodate[end_tail]
+    
+    markers = round(seq(1,nrow(sumPday2),length.out=10))
+    datelabel=sumPday2$pseudodate[markers]
+    
+    ####
+    
+    medianlimit=50
+    ind_med=which.min(abs(sumPday2$netSum_pct - medianlimit))
+    median_date=sumPday2$pseudodate[ind_med]
+    
+    ####
+    percentage=50 #E50
+    sumPday2$net=ifelse(is.na(sumPday2$net),0,sumPday2$net)
+    x=netvalue*(percentage*0.01)
+    x=round(x)
+    n = length(sumPday2$net)
+    res = smallestSubWithSum(-sumPday2$net, n+1, x) 
+    start_E50=sumPday2$pseudodate[res[1]]
+    end_E50=sumPday2$pseudodate[res[2]]
+    
+    
+    ####
+    upperlimit2=75
+    lowerlimit2=25
+    
+    sumPday2$incl2=ifelse(sumPday2$netSum_pct<upperlimit2 & 
+                           sumPday2$netSum_pct>lowerlimit2,
+                         1,0)
+    
+    inds2=which(sumPday2$incl2=="0")
+    if (length(inds2)>1) {
+      grp2=rep(0,length(inds2))
+      len2=length(inds2)
+      for (i in 1:(len2-1)){
+        diff2=inds2[i+1]-inds2[i]
+        if (diff2>1){
+          grp2[(i+1):len2]=grp2[(i+1):len2]+1
+        }  
+      }
+      
+      if (length(unique(grp2))>1) {
+        #start tail
+        f2=which(grp2==min(grp2))  
+        start_tail2=inds2[which(grp2==min(grp2))[length(f2)]]
+        #end tail
+        end_tail2=inds2[which(grp2==max(grp2))[1]]
+        
+        sumPday2$rowID2=1:nrow(sumPday2)
+        sumPday2_sub2=subset(sumPday2,
+                            sumPday2$rowID2>start_tail2 
+                            & sumPday2$rowID2<end_tail2 )
+      } else {
+        start_tail2=1
+        end_tail2=nrow(sumPday2)
+        sumPday2_sub2=sumPday2
+      }
+    } else {
+      start_tail2=1
+      end_tail2=nrow(sumPday2)
+      sumPday2_sub2=sumPday2
+    } 
+    
+    start_date_new2=sumPday2$pseudodate[start_tail2]
+    end_date_new2=sumPday2$pseudodate[end_tail2]
+    
+    ####
+    upperlimit2=90
+    lowerlimit2=10
+    
+    sumPday2$incl2=ifelse(sumPday2$netSum_pct<upperlimit2 & 
+                           sumPday2$netSum_pct>lowerlimit2,
+                         1,0)
+    
+    inds2=which(sumPday2$incl2=="0")
+    if (length(inds2)>1) {
+      grp2=rep(0,length(inds2))
+      len2=length(inds2)
+      for (i in 1:(len2-1)){
+        diff2=inds2[i+1]-inds2[i]
+        if (diff2>1){
+          grp2[(i+1):len2]=grp2[(i+1):len2]+1
+        }  
+      }
+      
+      if (length(unique(grp2))>1) {
+        #start tail
+        f2=which(grp2==min(grp2))  
+        start_tail2=inds2[which(grp2==min(grp2))[length(f2)]]
+        #end tail
+        end_tail2=inds2[which(grp2==max(grp2))[1]]
+        
+        sumPday2$rowID2=1:nrow(sumPday2)
+        sumPday2_sub2=subset(sumPday2,
+                            sumPday2$rowID2>start_tail2 
+                            & sumPday2$rowID2<end_tail2 )
+      } else {
+        start_tail2=1
+        end_tail2=nrow(sumPday2)
+        sumPday2_sub2=sumPday2
+      }
+    } else {
+      start_tail2=1
+      end_tail2=nrow(sumPday2)
+      sumPday2_sub2=sumPday2
+    } 
+    
+    p10_date=sumPday2$pseudodate[start_tail2]
+    p90_date=sumPday2$pseudodate[end_tail2]
+    
+    #saved dates and passes in a table
+    row_em=c(year=year,
+             start=as.character(startdate), 
+             end=as.character(enddate),
+             p5=as.character(start_date_new) , 
+             p10=as.character(p10_date),
+             p25=as.character(start_date_new2), 
+             p50=as.character(median_date),
+             p75=as.character(end_date_new2),
+             p90=as.character(p90_date),
+             p95=as.character(end_date_new)
+             )
+    
+    emergence_dates=rbind(emergence_dates,row_em)
+    
+    
+    #CONFIDENCE INTERVAL
+    mean_pass=0
+    blocked_hours=0
+    correction_lower=0
+    correction_upper=0
+    total_pass=sum(sumPday2$total)
+    a=estimate_with_SD_mean0(total_pass, netvalue,mean_pass,blocked_hours) 
+    b=estimate_with_SD_mean1(total_pass, netvalue,mean_pass,blocked_hours) 
+   
+     row_pop=c(year=year,estimate=netvalue,
+              lcl1= a[2],
+              ucl1= a[3],
+              lcl2= b[2],
+              ucl2= b[3],
+             ins=sum(sumPday2$pos),
+             outs=sum(sumPday2$neg),
+             total_passes=sum(sumPday2$total))
+    
+    pop_estimates=rbind(pop_estimates,row_pop)
+    
+    ###### EMERGENCE PLOT
+    may_start_date=sumPday$pseudodate[day]
+    
+   emergence_df=
+      sumPday %>%
+      dplyr::select(pseudodate,pos,neg) %>%
+      filter(pseudodate>as.Date(paste0(year,"-01-01")) & pseudodate<as.Date(paste0(year,"-06-15"))) %>% 
+      gather("direction","passes",-pseudodate)
+    minact=min(emergence_df$passes,na.rm = T)
+    
+    sumPdayF2= sumPdayF %>% 
+        filter(pseudodate>as.Date(paste0(year,"-01-01")) & pseudodate<as.Date(paste0(year,"-06-15"))) 
+    sumPdayF2$pseudodate=as.Date(sumPdayF2$pseudodate)
+    
+    #missing blocks
+    missing=miss %>% 
+    filter(Year==year) %>% 
+    mutate(end_date=ifelse(as.Date(end_date)>as.Date(paste0(year,"-06-15")),
+                           paste0(year,"-06-15"),
+                           as.character(end_date))) 
+    missing$start_date=as.Date(missing$start_date)
+    missing$end_date=as.Date(missing$end_date)
+    
+    #emergence plot 
+      emergence=emergence_df %>%
+         ggplot(aes(pseudodate,passes))+
+      #start-end of emergence phase
+      annotate("rect",xmin=startdate, xmax=enddate,
+               ymin=minact*1.20,ymax=minact*1.05,alpha=0.7,fill="#D1E5F0")+
+      #start of early summer
+      geom_vline(xintercept = may_start_date,col="grey50",linewidth=0.5, linetype="dashed")+
+      geom_vline(xintercept = as.Date(paste0(year,"-01-01")),col="grey50",linewidth=0.5, linetype="dashed")+
+      geom_col(fill="grey96",col="grey80",linewidth=0.2)+
+      scale_fill_manual(values=c("blue","red"))+
+      geom_col(data=sumPdayF2,aes(pseudodate,net,fill=type))+
+      theme_bw()+
+      theme(panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))+
+      theme(legend.position = "none")+
+      scale_y_continuous(breaks=pretty_breaks(n=6))+
+      theme(plot.title = element_text(hjust = 0.5))+
+       labs(y="total passes per night (grey)\n  net entry (red), next exit (blue)",x=NULL, title=paste0(year-1,"/",year))+
+      annotate("rect", xmin = c(missing$start_date), 
+                xmax = c(missing$end_date), 
+                ymin = -Inf, ymax = Inf, alpha = .1, fill = "red")+
+      scale_x_date(date_labels = "%d %b",
+                   breaks="3 weeks", expand=c(0.02,0),
+                     limits=c(as.Date(paste0(year,"-01-01")),
+                              as.Date(paste0(year,"-06-15"))))
+      
+    print(emergence)
+   
+    } 
+emergence_dates[-1,]
+```
