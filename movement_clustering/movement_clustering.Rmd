@@ -1,0 +1,341 @@
+---
+title: "movement_n"
+author: "BEDOET"
+date: "2025-02-07"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r packages}
+#required packages
+library(tidyverse)
+library(ggpubr)
+```
+
+```{r data, include=FALSE}
+# importing movement data + data correction----
+data <- read.csv("./data/Count_Data.csv", sep = ";")
+head(data)
+
+data$WinterNr <- as.factor(data$WinterNr)
+data$CountNr <- as.factor(data$CountNr)
+
+data$date <- as.Date(paste0(data$year,"-",data$month,"-",data$day))
+
+data$year <- as.factor(data$year)
+data$month <- as.factor(data$month)
+data$day <- as.factor(data$day)
+data$Room <- as.factor(data$Room)
+data$ObjectID <- as.factor(data$ObjectID)
+data$Category <- as.factor(data$Category)
+data$ObjectType <- as.factor(data$ObjectType)
+data$season <- as.factor(ifelse(month(data$date) > 2, ifelse(month(data$date) < 7, "3_emergence", "1_swarming"), "2_hibernation"))
+
+# iButton temperature data ----
+tempinside <- read.csv("./data/temp_iButton.csv", sep = ",")
+
+#colour schemes
+surveywintercolours <- c("19/20" = "#E69F00", "21/22" = "#56B4E9", "22/23" = "#CC79A7", "23/24" = "#000" , "24/25" = "#D55E00") 
+
+```
+
+```{r temperature_profile}
+#removing extreme iButton values
+#substracting the i - i+1 value, if larger than XX -> NA that row
+tempinside$diff <- c(0, diff(tempinside$temperature, lag = 1))
+
+tempinside$newtemp <- ifelse(between(tempinside$diff,-2, 2), tempinside$temperature, NA) #temperature changes over 2°C? -> NA!
+tempinside$newtemp<- ifelse(0 < tempinside$newtemp, tempinside$newtemp, NA)
+tempinside$newtemp<- ifelse(20 > tempinside$newtemp, tempinside$newtemp, NA)
+
+#filters middle values out when 10, 10, 10, NA, 8, 8, NA, 10, 10 -> those NAs where false values like -40°C
+for(i in seq(1, nrow(tempinside), 1)){
+  if(!is.na(tempinside$newtemp[i]) && is.na(tempinside$newtemp[i-1]) && is.na(tempinside$newtemp[i+1]) || is.na(tempinside$newtemp[i+2])) tempinside$newtemp[i] <- NA
+}
+
+tempinside$temperature <- tempinside$newtemp
+tempinside <- tempinside |>
+  select(-diff, -newtemp)
+
+tempinside$datetime <- force_tz(as_datetime(paste(tempinside$date, tempinside$time)), "Europe/Berlin")
+
+tempinside$WinterNr <- ifelse(as.Date(tempinside$date) > ymd("2023.11.01"), 23, 0)
+tempinside <- tempinside[tempinside$WinterNr == 23, ]
+tempinside$date <- as.Date(tempinside$date)
+
+min(tempinside$date)
+max(tempinside$date)
+
+tempplot <- ggplot(tempinside, aes(x = date, y = temperature))+
+  theme_classic()+
+  theme(legend.position = "none")+
+  stat_summary(geom = "ribbon", fun.min = min, fun.max = max, fill = "gray")+
+  stat_summary(geom = "line", fun = mean)+ #or fun = median
+  scale_y_continuous(breaks = seq(3, 12, 1))+
+  labs(x = "date", y = "hibernaculum temperature [°C]")+
+  coord_cartesian(ylim = c(3, 12), expand = F)+
+  theme(axis.text.x = element_text(colour = "black"),
+        axis.text.y = element_text(colour = "black"),
+        axis.title.x = element_blank())
+tempplot
+ggsave(paste0("./plots/temp_profile.png"),width = 15, height = 10, units = "cm")
+
+```
+
+```{r visual_count_summary}
+# Survey overview ----
+countyear <- data |>
+  select(WinterNr, CountNr, date, Mmyo, Mnat, Mdau) |>
+  group_by(WinterNr, CountNr, date) |>
+  summarise(Mmyo = sum(Mmyo),
+            Mdau = sum(Mdau),
+            Mnat = sum(Mnat)) |>
+  pivot_longer(cols = c("Mmyo", "Mdau", "Mnat"), names_to = "species", values_to = "sum") |>
+  ungroup()
+
+#get monthday + correct year
+year(countyear$date) <- ifelse(month(countyear$date) > 7, 2023, 2024)
+
+levels(countyear$WinterNr)
+levels(countyear$WinterNr) <- c("19/20","21/22","22/23","23/24","24/25")
+
+#plot visual counts over winter per species, per year
+total_count_plot=ggplot(countyear, aes(x = date, y = sum, colour = WinterNr))+
+  geom_vline(xintercept = as.Date("2024-01-01"), linetype="dashed", color="grey60")+
+  geom_vline(xintercept = as.Date("2024-02-15"), linetype="dashed",
+             color="grey60")+
+  geom_line(linewidth = .7)+
+  geom_point(size = .7)+  
+  theme_classic()+
+  facet_wrap(vars(species), labeller = labeller(species = c(Mdau = "Myotis daubentonii", 
+                                                            Mmyo = "Myotis myotis", 
+                                                            Mnat = "Myotis nattereri")))+ #species names instead of abbreviations
+  labs(y = "Visual count total")+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_text(colour = "black"),
+        axis.text.y = element_text(colour = "black"),
+        strip.text.x.top = element_text(face = "italic")) +
+    scale_color_manual(name = "winter", values = surveywintercolours)+
+    scale_y_continuous(breaks = seq(0, 150, 25), expand = c(0, 0), limits = c(0, 140)) #sets more breaks at y-axis, zeroes it and keeps upper expand over value
+total_count_plot
+ggsave(paste0("./plots/total_count.png"),width = 15, height = 10, units = "cm")
+
+
+#values
+countyear_values <- countyear |>
+  group_by(WinterNr, species) |>
+  summarise(max = max(sum))
+```
+
+
+```{r movement_rate}
+dataOC <- data[data$Category == "object", ]
+
+Allspecies <- c("Mdau", "Mnat", "Mmyo")
+Activity_points <- data.frame()
+for(winter in unique(dataOC$WinterNr)){
+  Wdata <- dataOC[dataOC$WinterNr== winter, ] #selects specified Winter data
+  
+  for(species in Allspecies){
+    dataAnalysis <- Wdata %>%
+      dplyr::select(CountNr, date, Room, ObjectID, ObjectType, all_of(species))
+    
+    names(dataAnalysis) <- c("CountNr", "date", "Room", "ObjectID", "ObjectType", "Bats")
+    
+    Activitylist <- list()
+    
+    for(i in 1:(length(unique(dataAnalysis$CountNr))-1)){ #loop for every Count #goal is to merge Count i with i+1 to calculate Bats that stay, leave and Newcomers
+      
+      #t0
+      subdataT0 <- dataAnalysis[dataAnalysis$CountNr == i,]
+      
+      #t1
+      subdataT1 <- dataAnalysis[dataAnalysis$CountNr == i+1,]
+      
+      #t2
+      subdataT2 <- dataAnalysis[dataAnalysis$CountNr == i+2,]
+      
+      
+      #merge of t0-t1
+      dataframeSLN <- merge(subdataT0, subdataT1, by = "ObjectID", all = TRUE) |>
+        merge(subdataT2, by = "ObjectID", all = TRUE) #dataframe with ObjectIDs that were occupied at t0 and their occupancy at t1
+      
+      #removing NAs from Bats.x and Bats.y
+      dataframeSLN$Bats.x[is.na(dataframeSLN$Bats.x)] <- 0
+      dataframeSLN$Bats.y[is.na(dataframeSLN$Bats.y)] <- 0
+      dataframeSLN$Bats[is.na(dataframeSLN$Bats)] <- 0
+      
+      
+      #calculating Bats that stay, bats that leave and newcomers
+      dataframeSLN <- dataframeSLN %>%
+        #mutate(BatsT0 = dataframeSLN$Bats.x) %>%
+        mutate(Bats_Stay = ifelse(Bats.x<=Bats.y, Bats.x ,Bats.y)) |> #Bats that stay t0 to t1
+        mutate(Bats_StayT2 = ifelse(Bats.x != 0 & Bats.y <= Bats, Bats.y, Bats)) |> #Bats that stay t1 to t2
+        mutate(Bats_Leave = ifelse(Bats.x > Bats.y, Bats.x - Bats.y , 0)) |> #Bats that leave from t0 to t1
+        mutate(Bats_LeaveT2 = ifelse(Bats.x != 0 & Bats.y > Bats, Bats.y-Bats,0)) #Bats that leave from t1 to t2
+      
+      Activitylist[i] <- list(dataframeSLN)
+      
+    } #end of loop for every Count (Activitylist)
+    
+    Activitydf <- data.frame(matrix(ncol = 0, nrow = length(Activitylist))) #Dataframe with t0, t1 and t2 for each Count
+    
+    for(i in 1:length(Activitylist)){
+      subdatadf <- Activitylist[[i]]
+      Activitydf[i,1] <- winter
+      Activitydf[i,2] <- i #CountNrT0
+      Activitydf[i,3] <- unique(na.omit(subdatadf$date.x)) #DateT0
+      Activitydf[i,4] <- unique(na.omit(subdatadf$date.y)) #DateT1
+      Activitydf[i,5] <- sum(subdatadf$Bats_Stay) #Bats that Stay t0 to t1
+      Activitydf[i,6] <- sum(subdatadf$Bats_StayT2, na.rm = TRUE) #Bats that stay t1 to t2
+      Activitydf[i,7] <- sum(subdatadf$Bats_Leave,  na.rm = TRUE) #Bats that leave t0 to t1
+      Activitydf[i,8] <- sum(subdatadf$Bats_LeaveT2, na.rm = TRUE) #Bats that leave t1 to t2
+      Activitydf[i,9] <- unique(na.omit(subdatadf$date.y - subdatadf$date.x)) #adds countinterval
+      #Activitydf[i,6] <- sum(subdatadf$Bats_New, na.rm = TRUE) #Bats that join
+    } #end of loop for Activitydf
+    
+    names(Activitydf) <- c("WinterNr", "CountT0", "DateT0", "DateT1", "Bats_Stay", "Bats_StayT2", "Bats_Leave", "Bats_LeaveT2", "CountInterval")
+    
+    Activitydf_longer <- Activitydf %>%
+      pivot_longer(cols = c(Bats_Stay, Bats_StayT2, Bats_Leave, Bats_LeaveT2))
+    
+    Activitydf_longer$species <- species
+    
+    Activity_points <- rbind(Activity_points, Activitydf_longer)
+    
+  } #end of species loop
+  
+} #end of winter loop
+
+
+Activity_points <- Activity_points |>
+  pivot_wider(names_from = name, values_from = value) |>
+  group_by(DateT0, DateT1, CountInterval, species) |>
+  summarise(Movementrate = round(Bats_Leave/(Bats_Stay+Bats_Leave),2),
+            Movementrate2 = round(Bats_LeaveT2/(Bats_StayT2+Bats_LeaveT2),2),
+            WinterNr = unique(WinterNr)) |>
+  ungroup()
+
+year(Activity_points$DateT0) <- ifelse(month(Activity_points$DateT0) > 7, 2023, 2024)
+year(Activity_points$DateT1) <- ifelse(month(Activity_points$DateT1) > 7, 2023, 2024)
+
+Activity_points$Movementrate <- Activity_points$Movementrate*100
+Activity_points$Movementrate2 <- Activity_points$Movementrate2*100
+
+movement_rate_plot=ggplot(Activity_points, aes(x = DateT0, y = Movementrate, group = species, colour = CountInterval)) + 
+  geom_vline(xintercept = as.Date("2024-01-01"), linetype="dashed", color="grey60")+
+  geom_vline(xintercept = as.Date("2024-02-15"), linetype="dashed",
+             color="grey60")+
+  geom_point()+ 
+  geom_smooth(colour = "black",linewidth=1, method = "loess", formula = y~x, span = 1, level = .95, alpha = .2)+
+   theme_classic()+
+  facet_wrap(vars(species), labeller = labeller(species = c(Mdau = "Myotis daubentonii", 
+                                                            Mmyo = "Myotis myotis", 
+                                                            Mnat = "Myotis nattereri")))+ #species names instead of abbreviations
+  theme(strip.text.x.top = element_text(face = "italic", colour = "black"), #species names italic
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(colour = "black"),
+        axis.text.y = element_text(colour = "black"),
+        legend.title = element_text(size = 9)
+        )+
+  coord_cartesian(ylim = c(0,100))+
+  labs(y = "Movement rate [%]") + 
+  scale_colour_viridis_c(name = "Survey \ninterval \n[days]")
+movement_rate_plot
+ggsave(paste0("./plots/movement_rate.png"),width = 15, height = 10, units = "cm")
+
+```
+
+```{r clustering}
+#filter per year only those surveys where >- of max amount per species was counted
+DatesWithEnoughBats <- data |> dplyr::filter(Category == "object" & ObjectType != "room") |>
+  select(WinterNr, CountNr, date, Mmyo, Mnat, Mdau) |>
+  group_by(WinterNr, CountNr, date) |>
+  summarise(Mmyo = sum(Mmyo),
+            Mdau = sum(Mdau),
+            Mnat = sum(Mnat)) |>
+  pivot_longer(cols = c("Mmyo", "Mdau", "Mnat"), names_to = "species", values_to = "InCrev") |>
+  group_by(WinterNr, species) |>
+  mutate(max = max(InCrev),
+         percent = InCrev/max) |>
+  ungroup() |>
+  select(-WinterNr, -CountNr)
+
+DatesWithEnoughBats <- DatesWithEnoughBats[DatesWithEnoughBats$percent >= .5,] |>
+  select(date, species) |>
+  mutate(enoughBats = "yes",
+         datespecies = paste(date, species, sep = "_")) |>
+  select(enoughBats, datespecies)
+
+
+cluster <- data |> dplyr::filter(Category == "object" & ObjectType != "room")
+
+cluster <- cluster |>
+  rowwise() |>
+  mutate(bats = sum(Mdau, Mmyo, Mnat, Mbra, Paur, Eser))
+
+cluster$cluster <- ifelse(cluster$Mdau == cluster$bats, "conspecific", ifelse(cluster$Mmyo == cluster$bats, "conspecific", ifelse(cluster$Mnat == cluster$bats, "conspecific", ifelse(cluster$Mbra == cluster$bats, "conspecific", ifelse(cluster$Paur == cluster$bats, "conspecific", "heterospecific")))))
+cluster$cluster <- as.factor(ifelse(cluster$bats <= 1, "nocluster", cluster$cluster)) 
+
+## relative Amount of Bats per species in cluster per Count ----
+amountcluster <- cluster |>
+  group_by(date, cluster, WinterNr, season) |>
+  summarise(Mdau = sum(Mdau),
+            Mnat = sum(Mnat),
+            Mmyo = sum(Mmyo)) |>
+  pivot_longer(cols = c("Mdau", "Mmyo", "Mnat"), names_to = "species", values_to = "amount") |>
+  pivot_wider(names_from = cluster, values_from = amount)
+
+amountcluster[is.na(amountcluster)] <- 0
+
+amountcluster <- amountcluster |>
+  mutate(perccluster = round((conspecific + heterospecific)/ (nocluster + conspecific + heterospecific), 2),
+         percconspec = round((conspecific)/ (nocluster + conspecific + heterospecific), 2),
+         percheterospec = round((heterospecific)/ (nocluster + conspecific + heterospecific), 2),
+         datespecies = paste(date, species, sep = "_")) |>
+  ungroup()
+
+amountclusterenoughbats <- left_join(amountcluster, DatesWithEnoughBats, by = join_by(datespecies))
+
+year(amountclusterenoughbats$date) <-  ifelse(month(amountclusterenoughbats$date) < 10, 2024, 2023)
+amountclusterenoughbats <- amountclusterenoughbats[!is.na(amountclusterenoughbats$enoughBats),]
+
+levels(amountclusterenoughbats$WinterNr)
+levels(amountclusterenoughbats$WinterNr) <- c("19/20","21/22","22/23","23/24","24/25")
+
+## % of species in cluster per season ----
+cluster_plot= ggplot(amountclusterenoughbats, aes(x = date, y = perccluster*100))+
+   geom_vline(xintercept = as.Date("2024-01-01"), linetype="dashed", color="grey60")+
+  geom_vline(xintercept = as.Date("2024-02-15"), linetype="dashed",
+             color="grey60")+
+   geom_point(aes(col=WinterNr))+
+  ggpmisc::stat_poly_line(col="grey40", alpha=0.2, linewidth=0.8)+
+  ggpmisc::stat_poly_eq()+  
+  coord_cartesian(ylim = c(0,100))+
+  facet_wrap(vars(species))+
+  theme_classic()+
+  labs(y = "Clustering bats [%]")+
+  theme(strip.text.x.top = element_text(face = "italic", colour = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_text(colour = "black"),
+        axis.text.y = element_text(colour = "black"))  +
+  facet_wrap(vars(species), labeller = labeller(species = c(Mdau = "Myotis daubentonii", 
+                                                            Mmyo = "Myotis myotis", 
+                                                            Mnat = "Myotis nattereri")))+
+   scale_color_manual(name = "winter", values = surveywintercolours)
+cluster_plot
+
+ggsave(paste0("./plots/clustering.png"),width = 15, height = 10, units = "cm")
+```
+
+```{r figure2}
+temp_plot_7day <- readRDS("./data/temp_plot_7day.rds")
+
+merged_plots=
+  ggarrange(total_count_plot, movement_rate_plot, cluster_plot,temp_plot_7day,
+          ncol=2,nrow=2, labels = toupper(paste0(letters[1:4],")")))
+merged_plots
+ggsave(paste0("./plots/figure2_merged.png"),width = 30, height = 20, units = "cm")
+```
+
