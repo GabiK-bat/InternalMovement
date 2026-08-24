@@ -1,0 +1,179 @@
+---
+title: "temperature_correlation"
+output: html_document
+date: "2026-04-30"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+#required packages
+knitr::opts_chunk$set(echo = TRUE, warning = F, message=F)
+library(tidyverse)
+library(zoo)
+library(ggpmisc)
+
+library(broom)
+library(summariser)
+library(ggpubr)
+
+library(tidyr)
+library(purrr)
+library(lubridate)
+library(broom)
+
+library(ape) 
+library(vegan)
+```
+
+#Count data formatting
+```{r count_data}
+#read data
+dat=read.csv2("./data/Count_Data.csv")
+head(dat)
+
+#filter and summarise data
+dat3=dat %>% 
+  filter(month==11|month==12|month==1 |month==2  |month==3 |month==4) %>% #keep counts from Nov-Apr
+  select(WinterNr,year,month,day,Mdau,Mmyo,Mnat) %>% 
+  mutate(date=as.Date(paste0(year,"-",month,"-",day))) %>% 
+  group_by(date,WinterNr) %>% 
+  summarise(Mdau=sum(Mdau), Mnat=sum(Mnat), Mmyo=sum(Mmyo))
+
+
+#pivot to long format
+dat3_long= dat3 %>% 
+  pivot_longer(cols = c(Mdau, Mnat, Mmyo),
+               names_to = "species",
+               values_to = "count")
+
+# Create a 'month_day' date ignoring year (so plots align on calendar date)
+dat3_long = dat3_long %>%
+  mutate(month_day = as.Date(format(date, "2000-%m-%d"))) %>% 
+  ungroup()
+
+year(dat3_long$month_day) <- ifelse(month(dat3_long$date) > 7, 1999, 2000)
+```
+
+#Temperature data formatting
+```{r temperature_data}
+#hourly temp data from Greifswald station 1757
+temp1=read.table("./data/temp_historical.txt",sep=";",header=TRUE)
+temp2=read.table("./data/temp_recent.txt",sep=";",header=TRUE)
+temp=bind_rows(temp1, temp2)
+head(temp)
+tail(temp)
+temp=transform(temp, Year = substr(MESS_DATUM, 1, 4), 
+               Month = substr(MESS_DATUM, 5, 6),
+               Day = substr(MESS_DATUM, 7, 8),
+               Hour = substr(MESS_DATUM, 9, 10),
+               DateID=substr(MESS_DATUM, 1, 10))
+temp=temp[,c(1,2,4,5,7:11)]
+head(temp)
+
+temp$date=as.vector(paste0(temp$Year, ".", temp$Month, ".", temp$Day))
+
+colnames(temp)=c("station", "date_time", "temp", "hum", 
+                 "year", "month", "day", "hour", "dateID", "date")
+
+#str(temp)
+temp$month=as.numeric(as.character(temp$month))
+temp$day=as.numeric(as.character(temp$day))
+temp$year=as.numeric(as.character(temp$year))
+temp$date=as.Date(temp$date, tryFormats = c("%Y.%m.%d"))
+#head(temp)
+#tail(temp)
+
+#average daily temperature
+temp_mean=temp %>% 
+  filter(year>2018) %>% 
+  group_by(date) %>% 
+  summarise(mean_temp=mean(temp))
+
+#minimum daily temperature
+temp_min=temp %>% 
+  filter(year>2018) %>% 
+  group_by(date) %>% 
+  summarise(min_temp=min(temp))
+```
+
+```{r temp_mean}
+#Compute daily means to avoid bias from uneven sampling (like this every day counts equally)
+daily_means = temp %>% 
+  filter(year>2018) %>% 
+  group_by(date) %>%
+  summarise(daily_mean_temp = mean(temp, na.rm = TRUE), .groups = "drop")
+```
+
+```{r 7day_temp_mean}
+# Compute rolling 7-day average (including count day)
+daily_means_7day = daily_means %>%
+  arrange(date) %>%
+  mutate(mean_prev_7_days = zoo::rollapply(
+    daily_mean_temp, 
+    width = 7, 
+    FUN = mean, 
+    align = "right", 
+    fill = NA,
+    partial = FALSE  
+  ))
+
+#shift to exclude current day
+daily_means_7day = daily_means_7day %>%
+  mutate(mean_prev_7_full_days = lag(mean_prev_7_days))
+
+dat3_long$date_before=dat3_long$date-1
+```
+
+
+```{r 7_day_window}
+temp_mean_roll <- temp_mean %>%
+  arrange(date) %>%
+  mutate(
+    temp_7day = zoo::rollapply(mean_temp, 7, mean, align = "right", fill = NA)
+  ) %>%
+  mutate(
+    mean_prev_7_full_days = lag(temp_7day)
+  )
+
+#7day window
+temp_plot_7day=left_join(dat3_long, temp_mean_roll, by = c("date_before" = "date")) %>% 
+  mutate(window = case_when(
+    month_day < as.Date("2000-01-01") ~ "before core",
+    month_day >= as.Date("2000-01-01") & month_day <= as.Date("2000-02-15") ~ "core hibernation",
+    month_day > as.Date("2000-02-15") ~ "after core"
+  )) %>% 
+  mutate(window=factor(window, levels=c("before core","core hibernation","after core"))) %>% 
+  mutate(month = lubridate::month(month_day,label = TRUE, abbr = TRUE)) %>% 
+  mutate(month = factor(month,
+                      levels = c("Nov","Dec", "Jan", "Feb", "Mar","Apr"))) %>% 
+  ggplot(aes(x = mean_prev_7_full_days, y = count)) +
+  geom_point(aes(color = as.factor(month))) +
+    facet_grid(window ~ species, scales = "free",
+             labeller = labeller(
+               species = c(
+                 Mdau = "Myotis daubentonii",
+                 Mmyo = "Myotis myotis",
+                 Mnat = "Myotis nattereri"
+               )
+             )) +
+  
+  theme_bw() +
+  labs(
+    y = "Visual count total",
+    x = "Mean external air temperature (7-day window before the survey)",
+    color = "month"
+  ) +
+  
+  stat_poly_line(aes(group = 1), color = "grey40", alpha=0.2, linewidth=0.8) +
+  stat_poly_eq(aes(group = 1), size=3,
+               label.x = "left",
+               label.y = "bottom") +
+  theme(strip.text.x.top = element_text(face = "italic"),
+        strip.background = element_rect(fill="white"),
+        panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank())
+temp_plot_7day
+saveRDS(temp_plot_7day, "./data/temp_plot_7day.rds")
+```
+
